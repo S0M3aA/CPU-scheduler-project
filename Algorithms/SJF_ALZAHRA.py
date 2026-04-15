@@ -1,321 +1,135 @@
-"""
-algorithms/sjf.py
------------------
-Shortest Job First (SJF) Scheduling Algorithm
-  - sjf_non_preemptive : Once a process starts, it runs to completion.
-  - sjf_preemptive     : Also known as SRTF (Shortest Remaining Time First).
-                         A running process can be preempted by a newly arrived
-                         process with a shorter remaining burst time.
+import copy # Imports the copy module to allow us to create deep clones of the process objects.
+from Utils.metrics import calculate_averages # Imports the centralized function to calculate average waiting and turnaround times.
+from Utils.validator import validate_processes # Imports the centralized function to check for invalid process inputs.
 
-Output format (same for ALL algorithms in this project):
-    {
-        "timeline"              : list of (pid, start_time, end_time),
-        "average_waiting_time"  : float,
-        "average_turnaround_time": float,
-        "remaining_table"       : list of dicts  {time, pid: remaining, ...}
-    }
-"""
+def _snapshot(time, processes): # Defines a helper function to record the remaining burst times of all processes at a specific time.
+    row = {"time": time} # Creates a dictionary starting with the current time unit.
+    for p in processes: # Loops through every process in the list.
+        row[p.pid] = p.remaining_time # Adds the process ID and its current remaining burst time to the snapshot dictionary.
+    return row # Returns the completed snapshot dictionary for the GUI's live table.
 
-import copy
-from typing import List
+def sjf_non_preemptive(processes): # Defines the main function for Non-Preemptive Shortest Job First scheduling.
+    validate_processes(processes) # Checks the input processes for errors (like negative burst times) to prevent crashes.
+    procs = copy.deepcopy(processes) # Creates a deep clone of the processes list to protect the GUI's original data.
+    for p in procs: # Loops through the copied processes.
+        p.remaining_time = p.burst_time # Sets the initial remaining time equal to the total burst time for each process.
 
+    timeline = [] # Initializes an empty list to store the execution blocks for the Gantt chart.
+    remaining_table = [] # Initializes an empty list to store the second-by-second states for the live table.
+    n = len(procs) # Calculates and stores the total number of processes.
 
-# ─────────────────────────────────────────────
-#  Helper – snapshot of remaining times
-# ─────────────────────────────────────────────
-def _snapshot(time: int, processes) -> dict:
-    """Return a dict representing remaining burst times at a given time unit."""
-    row = {"time": time}
-    for p in processes:
-        row[p.pid] = p.remaining_time
-    return row
+    if n == 0: # Checks if the process list is empty.
+        return {"timeline": [], "average_waiting_time": 0, "average_turnaround_time": 0, "remaining_table": []} # Returns an empty result dictionary to avoid crashing on empty input.
+    
+    completed = 0 # Initializes a counter to track how many processes have completely finished.
+    current_time = 0 # Initializes the simulated CPU clock to 0.
+    done = [False] * n # Creates a boolean list to keep track of which processes are completely finished.
 
+    remaining_table.append(_snapshot(current_time, procs)) # Takes and stores the very first snapshot of the system at time 0.
 
-# ═══════════════════════════════════════════════════════════════
-#  SJF  NON-PREEMPTIVE
-# ═══════════════════════════════════════════════════════════════
-def sjf_non_preemptive(processes: List) -> dict:
-    """
-    Non-Preemptive Shortest Job First scheduling.
+    while completed < n: # Starts a loop that continues until every single process has finished executing.
+        ready = [p for i, p in enumerate(procs) if not done[i] and p.arrival_time <= current_time] # Creates a list of all processes that have arrived and are not done yet.
 
-    Logic:
-      1. Sort all processes by arrival time (then burst time for ties).
-      2. At each scheduling decision point, collect all processes that have
-         already arrived and pick the one with the smallest burst_time.
-      3. Run it to completion – no interruptions allowed.
-      4. Advance the clock by its burst_time.
-    """
+        if not ready: # Checks if the ready queue is empty (meaning the CPU is currently idle).
+            next_arrival = min(p.arrival_time for i, p in enumerate(procs) if not done[i]) # Finds the arrival time of the very next process that will arrive.
+            while current_time < next_arrival: # Loops to advance the clock during this idle period.
+                current_time += 1 # Ticks the CPU clock forward by 1 second.
+                remaining_table.append(_snapshot(current_time, procs)) # Records a snapshot of this idle second.
+            continue # Skips the rest of the loop and checks the ready queue again at the new time.
 
-    # Work on deep copies so the originals are never mutated
-    procs = copy.deepcopy(processes)
+        selected = min(ready, key=lambda p: (p.burst_time, p.arrival_time, p.pid)) # Selects the process with the shortest burst time; breaks ties by arrival time, then PID.
+        start = current_time # Records the time the selected process starts executing.
+        end = current_time + selected.burst_time # Calculates the exact time the process will finish its entire burst.
 
-    # Reset remaining_time to burst_time (clean slate)
-    for p in procs:
-        p.remaining_time = p.burst_time
+        if selected.start_time == -1: # Checks if this is the very first time this process is getting the CPU.
+            selected.start_time = start # Records the initial start time for calculating waiting time later.
 
-    timeline        = []   # (pid, start, end)
-    remaining_table = []   # one row per time unit
+        while current_time < end: # Runs a loop until the selected process finishes its burst completely (Non-Preemptive).
+            current_time += 1 # Advances the CPU clock by 1 second.
+            selected.remaining_time -= 1 # Decreases the process's remaining burst time by 1 second.
+            remaining_table.append(_snapshot(current_time, procs)) # Records a snapshot of the system after this second of work.
 
-    n            = len(procs)
-    completed    = 0
-    current_time = 0
-    done         = [False] * n
+        selected.finish_time = current_time # Records the exact time the process finished completely.
+        idx = next(i for i, p in enumerate(procs) if p.pid == selected.pid) # Finds the original index of this finished process in the main list.
+        done[idx] = True # Marks this process as completely finished in our boolean tracking list.
+        completed += 1 # Increments the completed processes counter.
 
-    # ── Snapshot at time 0 ──
-    remaining_table.append(_snapshot(current_time, procs))
+        timeline.append((selected.pid, start, end)) # Adds the execution block (PID, start, end) to the Gantt chart timeline.
 
-    while completed < n:
+    # Utilize Utils for metrics # A comment indicating we are about to calculate final statistics.
+    for p in procs: # Loops through all finished processes.
+        p.turnaround_time = p.finish_time - p.arrival_time # Calculates Turnaround Time (Finish Time - Arrival Time).
+        p.waiting_time = p.turnaround_time - p.burst_time # Calculates Waiting Time (Turnaround Time - Burst Time).
 
-        # Collect processes that have arrived and are not yet done
-        ready = [
-            p for i, p in enumerate(procs)
-            if not done[i] and p.arrival_time <= current_time
-        ]
+    avg_wt, avg_tat = calculate_averages(procs) if n > 0 else (0, 0) # Uses the external utility to calculate averages, returning 0s if there are no processes.
 
-        if not ready:
-            # CPU is idle – jump to the next process arrival
-            next_arrival = min(
-                p.arrival_time for i, p in enumerate(procs) if not done[i]
-            )
-            # Record idle snapshots for each idle time unit
-            while current_time < next_arrival:
-                current_time += 1
-                remaining_table.append(_snapshot(current_time, procs))
-            continue
+    return { # Starts the dictionary to return all data to the GUI.
+        "timeline": timeline, # Includes the Gantt chart data.
+        "average_waiting_time": round(avg_wt, 2), # Includes the average waiting time rounded to 2 decimals.
+        "average_turnaround_time": round(avg_tat, 2), # Includes the average turnaround time rounded to 2 decimals.
+        "remaining_table": remaining_table # Includes the second-by-second live table snapshots.
+    } # Closes the return dictionary.
 
-        # ── Pick process with shortest burst_time; break ties by arrival, then pid ──
-        selected = min(ready, key=lambda p: (p.burst_time, p.arrival_time, p.pid))
+def sjf_preemptive(processes): # Defines the main function for Preemptive Shortest Job First (SRTF) scheduling.
+    validate_processes(processes) # Validates the inputs to prevent runtime errors.
+    procs = copy.deepcopy(processes) # Deep copies the process list so the GUI's data remains untouched.
+    for p in procs: # Loops through the copied processes.
+        p.remaining_time = p.burst_time # Resets remaining time to equal the full burst time.
 
-        start = current_time
-        end   = current_time + selected.burst_time
+    timeline_raw = [] # Initializes a raw timeline list that will store 1-second execution blocks.
+    remaining_table = [] # Initializes the list for second-by-second state snapshots.
+    n = len(procs) # Counts the total number of processes.
+    
+    if n == 0: # Checks for an empty process list.
+        return {"timeline": [], "average_waiting_time": 0, "average_turnaround_time": 0, "remaining_table": []} # Safely returns empty data if there are no processes.
 
-        # ── Write back start_time on first execution ──
-        if selected.start_time == -1:
-            selected.start_time = start
+    completed = 0 # Initializes the counter for fully finished processes.
+    current_time = 0 # Initializes the CPU clock.
+    done = {p.pid: False for p in procs} # Creates a dictionary to track which Process IDs are completely finished.
 
-        # Run selected process to completion – record one snapshot per time unit
-        while current_time < end:
-            current_time            += 1
-            selected.remaining_time -= 1
-            remaining_table.append(_snapshot(current_time, procs))
+    remaining_table.append(_snapshot(current_time, procs)) # Stores the initial state at time 0.
 
-        # ── Write back finish_time when process completes ──
-        selected.finish_time = current_time
+    while completed < n: # Loops until all processes have finished.
+        ready = [p for p in procs if not done[p.pid] and p.arrival_time <= current_time] # Finds all processes that have arrived and aren't done yet.
 
-        # Mark as done
-        idx = next(i for i, p in enumerate(procs) if p.pid == selected.pid)
-        done[idx] = True
-        completed += 1
+        if not ready: # If no processes are ready (CPU is idle)...
+            current_time += 1 # Advance the clock by 1 second.
+            remaining_table.append(_snapshot(current_time, procs)) # Take a snapshot of the idle state.
+            continue # Move to the next loop iteration.
 
-        # Append to timeline
-        timeline.append((selected.pid, start, end))
+        selected = min(ready, key=lambda p: (p.remaining_time, p.arrival_time, p.pid)) # Pick the process with the shortest remaining time; ties go to earliest arrival, then lowest PID.
 
-    # ── Compute waiting time & turnaround time ──
-    total_wt  = 0.0
-    total_tat = 0.0
+        if selected.start_time == -1: # If this is the process's very first time on the CPU...
+            selected.start_time = current_time # Record its start time.
 
-    for orig, proc in zip(processes, procs):
-        # Find when this process finished (end time of its timeline segment)
-        finish_time = next(end for pid, _, end in timeline if pid == proc.pid)
+        timeline_raw.append((selected.pid, current_time, current_time + 1)) # Log exactly 1 unit of execution for this process in the raw timeline.
+        selected.remaining_time -= 1 # Decrease the selected process's remaining time by 1 unit.
+        current_time += 1 # Move the CPU clock forward by 1 unit.
 
-        turnaround_time = finish_time - orig.arrival_time
-        waiting_time    = turnaround_time - orig.burst_time
+        remaining_table.append(_snapshot(current_time, procs)) # Record the system state after this 1 unit of execution.
 
-        # ── Write computed times back onto the ORIGINAL process objects ──
-        orig.start_time  = proc.start_time
-        orig.finish_time = proc.finish_time
+        if selected.remaining_time == 0: # Check if the process has completely finished its burst.
+            done[selected.pid] = True # Mark this process ID as fully completed in the tracking dictionary.
+            selected.finish_time = current_time # Record its exact finish time.
+            completed += 1 # Increment the completed counter.
 
-        total_tat += turnaround_time
-        total_wt  += waiting_time
+    timeline = [] # Initialize a clean timeline list to merge consecutive 1-second blocks.
+    for pid, start, end in timeline_raw: # Loop through every 1-second block in the raw timeline.
+        if timeline and timeline[-1][0] == pid and timeline[-1][2] == start: # If the current block matches the PID of the last block and picks up right where it left off...
+            timeline[-1] = (pid, timeline[-1][1], end) # Merge them by extending the end time of the previous block instead of adding a new one.
+        else: # If it's a different process or there was an idle gap...
+            timeline.append((pid, start, end)) # Add it as a brand new block to the clean timeline.
 
-    avg_wt  = round(total_wt  / n, 2)
-    avg_tat = round(total_tat / n, 2)
+    # Utilize Utils for metrics # A comment indicating we are about to calculate final statistics.
+    for p in procs: # Loop through all completed processes.
+        p.turnaround_time = p.finish_time - p.arrival_time # Calculate Turnaround Time.
+        p.waiting_time = p.turnaround_time - p.burst_time # Calculate Waiting Time.
 
-    return {
-        "timeline"               : timeline,
-        "average_waiting_time"   : avg_wt,
-        "average_turnaround_time": avg_tat,
-        "remaining_table"        : remaining_table,
-    }
+    avg_wt, avg_tat = calculate_averages(procs) if n > 0 else (0, 0) # Calculate averages using the utility.
 
-
-# ═══════════════════════════════════════════════════════════════
-#  SJF  PREEMPTIVE  (SRTF – Shortest Remaining Time First)
-# ═══════════════════════════════════════════════════════════════
-def sjf_preemptive(processes: List) -> dict:
-    """
-    Preemptive Shortest Job First (SRTF) scheduling.
-
-    Logic:
-      1. Simulate one time unit at a time.
-      2. At each tick, from all arrived & unfinished processes pick the one
-         with the smallest remaining_time (ties broken by arrival, then pid).
-      3. Run it for 1 unit; preempt if a better candidate arrives next tick.
-      4. Merge consecutive timeline entries for the same process into one
-         segment for a clean Gantt chart.
-    """
-
-    # Work on deep copies so the originals are never mutated
-    procs = copy.deepcopy(processes)
-
-    for p in procs:
-        p.remaining_time = p.burst_time
-
-    timeline_raw    = []   # raw (pid, t, t+1) per tick – merged later
-    remaining_table = []
-    finish_time_map = {}   # pid -> finish time (for WT / TAT calculation)
-
-    n            = len(procs)
-    completed    = 0
-    current_time = 0
-    done         = {p.pid: False for p in procs}
-
-    # Find the time when the last process arrives (upper bound for simulation)
-    max_arrival = max(p.arrival_time for p in procs)
-
-    # ── Snapshot at time 0 ──
-    remaining_table.append(_snapshot(current_time, procs))
-
-    while completed < n:
-
-        # Ready queue: arrived and not finished
-        ready = [p for p in procs if not done[p.pid] and p.arrival_time <= current_time]
-
-        if not ready:
-            # Idle tick – jump forward
-            current_time += 1
-            remaining_table.append(_snapshot(current_time, procs))
-            continue
-
-        # ── Pick process with shortest remaining_time; tie-break by arrival, pid ──
-        selected = min(ready, key=lambda p: (p.remaining_time, p.arrival_time, p.pid))
-
-        # ── Write back start_time on first execution ──
-        if selected.start_time == -1:
-            selected.start_time = current_time
-
-        # Run for 1 time unit
-        timeline_raw.append((selected.pid, current_time, current_time + 1))
-        selected.remaining_time -= 1
-        current_time += 1
-
-        # Record snapshot after this tick
-        remaining_table.append(_snapshot(current_time, procs))
-
-        # Check if selected process just finished
-        if selected.remaining_time == 0:
-            done[selected.pid]             = True
-            finish_time_map[selected.pid]  = current_time
-            selected.finish_time           = current_time   # ── write back finish_time
-            completed += 1
-
-    # ── Merge consecutive same-process segments into one Gantt block ──
-    timeline = []
-    for pid, start, end in timeline_raw:
-        if timeline and timeline[-1][0] == pid and timeline[-1][2] == start:
-            # Extend the last segment
-            timeline[-1] = (pid, timeline[-1][1], end)
-        else:
-            timeline.append((pid, start, end))
-
-    # ── Compute waiting time & turnaround time ──
-    total_wt  = 0.0
-    total_tat = 0.0
-
-    # ── Write start_time and finish_time back onto the ORIGINAL process objects ──
-    proc_map = {p.pid: p for p in procs}
-    for orig in processes:
-        orig.start_time  = proc_map[orig.pid].start_time
-        orig.finish_time = proc_map[orig.pid].finish_time
-
-    for orig in processes:
-        finish      = finish_time_map[orig.pid]
-        tat         = finish - orig.arrival_time
-        wt          = tat - orig.burst_time
-        total_tat  += tat
-        total_wt   += wt
-
-    avg_wt  = round(total_wt  / n, 2)
-    avg_tat = round(total_tat / n, 2)
-
-    return {
-        "timeline"               : timeline,
-        "average_waiting_time"   : avg_wt,
-        "average_turnaround_time": avg_tat,
-        "remaining_table"        : remaining_table,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Quick self-test  (remove or comment out before submission)
-# ═══════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-
-    # ── Inline Process class – matches models/process.py exactly ──
-    class Process:
-        def __init__(self, pid, arrival_time, burst_time, priority=0):
-            self.pid            = pid
-            self.arrival_time   = arrival_time
-            self.burst_time     = burst_time
-            self.priority       = priority
-            self.remaining_time = burst_time
-            self.start_time     = -1          # -1 means not started yet
-            self.finish_time    = 0
-        def __repr__(self):
-            return f"P{self.pid}"
-
-    def print_results(label: str, result: dict, procs: list):
-        print(f"\n{'═'*55}")
-        print(f"  {label}")
-        print(f"{'═'*55}")
-        print("  Gantt Chart Timeline:")
-        for pid, start, end in result["timeline"]:
-            bar = "█" * (end - start)
-            print(f"    {pid:>4}  [{start:>3} → {end:>3}]  {bar}")
-        print(f"\n  Average Waiting Time    : {result['average_waiting_time']}")
-        print(f"  Average Turnaround Time : {result['average_turnaround_time']}")
-        print("\n  Per-Process start_time / finish_time (written back):")
-        for p in procs:
-            tat = p.finish_time - p.arrival_time
-            wt  = tat - p.burst_time
-            print(f"    {p.pid:>4}  start={p.start_time:>3}  finish={p.finish_time:>3}"
-                  f"  WT={wt:>3}  TAT={tat:>3}")
-        print("\n  Remaining Table (first 5 rows):")
-        for row in result["remaining_table"][:5]:
-            print(f"    {row}")
-
-    # ── Test processes ──
-    test_processes = [
-        Process("P1", arrival_time=0, burst_time=8),
-        Process("P2", arrival_time=1, burst_time=4),
-        Process("P3", arrival_time=2, burst_time=9),
-        Process("P4", arrival_time=3, burst_time=5),
-    ]
-
-    print_results("SJF Non-Preemptive", sjf_non_preemptive(test_processes), test_processes)
-
-    # Reset processes for preemptive test
-    test_processes2 = [
-        Process("P1", arrival_time=0, burst_time=8),
-        Process("P2", arrival_time=1, burst_time=4),
-        Process("P3", arrival_time=2, burst_time=9),
-        Process("P4", arrival_time=3, burst_time=5),
-    ]
-    print_results("SJF Preemptive (SRTF)", sjf_preemptive(test_processes2), test_processes2)
-
-    # ── Edge case: all arrive at the same time ──
-    same_arrival = [
-        Process("P1", 0, 6),
-        Process("P2", 0, 3),
-        Process("P3", 0, 8),
-        Process("P4", 0, 1),
-    ]
-    print_results("SJF Non-Preemptive (same arrival)", sjf_non_preemptive(same_arrival), same_arrival)
-
-    same_arrival2 = [
-        Process("P1", 0, 6),
-        Process("P2", 0, 3),
-        Process("P3", 0, 8),
-        Process("P4", 0, 1),
-    ]
-    print_results("SJF Preemptive (same arrival)", sjf_preemptive(same_arrival2), same_arrival2)
+    return { # Start building the return dictionary.
+        "timeline": timeline, # Attach the merged, clean Gantt chart timeline.
+        "average_waiting_time": round(avg_wt, 2), # Attach the rounded average wait time.
+        "average_turnaround_time": round(avg_tat, 2), # Attach the rounded average turnaround time.
+        "remaining_table": remaining_table # Attach the live table snapshots.
+    } # Close the dictionary.
