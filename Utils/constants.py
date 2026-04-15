@@ -1,0 +1,1 @@
+ALGORITHMS = ["FCFS", "SJF", "Priority", "Round Robin"]
